@@ -1028,10 +1028,13 @@ async function writeMeta(outBase, uuid, className, opts = {}) {
   }
 
   const metaPath = outBase + fileExt + '.meta';
+  const isCompiledEffectData = className === 'cc.EffectAsset' && fileExt === '.effect.json';
   const meta = {
     ver: '1.2.7',
     uuid,
-    importer: classToImporter(className),
+    // A build retains compiled EffectAsset JSON, not editable CCEffect source.
+    // Mark it as JSON to avoid routing it to Creator's effect importer.
+    importer: isCompiledEffectData ? 'json' : classToImporter(className),
     downloadMode: 0,
     duration: 0,
     subMetas: (subMetas && typeof subMetas === 'object') ? subMetas : {},
@@ -1055,7 +1058,8 @@ function inferImportExt(className, flavor) {
       // True 3.x builds use .scene; 2.4 bundle / classic keep .fire (#32).
       return flavor === '3.x' ? '.scene' : '.fire';
     case 'cc.Prefab':        return '.prefab';
-    case 'cc.EffectAsset':   return '.effect';
+    // Compiled EffectAsset import data is JSON, not a CCEffect source file.
+    case 'cc.EffectAsset':   return '.effect.json';
     case 'cc.Material':      return '.mtl';
     case 'cc.AnimationClip': return '.anim';
     default:                 return '.json';
