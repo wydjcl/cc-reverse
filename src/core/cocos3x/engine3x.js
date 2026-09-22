@@ -20,6 +20,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const vm = require('vm');
+const crypto = require('crypto');
 const { logger } = require('../../utils/logger');
 const { uuidUtils } = require('../../utils/uuidUtils');
 const { forEachPool, getMaxParallel } = require('../../utils/asyncPool');
@@ -1736,21 +1737,31 @@ async function writeScriptMeta(scriptPath, uuidHint) {
 
 /**
  * Write a minimal Creator project descriptor.  Recovered 3.x builds retain
- * their source engine version in src/settings.json as CocosEngine, and Creator
- * Dashboard uses project.json.version to choose the editor.  Preserve that
- * version so a 3.8.x build is not incorrectly presented as a 3.0.0 project.
+ * their source engine version in src/settings.json as CocosEngine. Creator 3.x
+ * reads its identity and compatible editor version from root package.json;
+ * project.json is only the lightweight project marker.
  */
 async function writeProjectDescriptor(outputPath, settings = {}) {
+  const version = cocosEngineVersion(settings);
+  const projectId = generateProjectId();
   const descriptor = {
-    name: 'recovered-cocos3-project',
-    version: cocosEngineVersion(settings),
-    engine: 'cocos-creator-3',
-    packages: ['assets'],
-    recoveredBy: 'cc-reverse',
+    engine: 'cocos-creator-js',
+    packages: 'packages',
   };
   await writeFile(
     path.join(outputPath, 'project.json'),
     JSON.stringify(descriptor, null, 2),
+  );
+  await writeFile(
+    path.join(outputPath, 'package.json'),
+    JSON.stringify({
+      name: 'recovered-cocos3-project',
+      type: '3d',
+      uuid: projectId,
+      version,
+      creator: { version },
+      recoveredBy: 'cc-reverse',
+    }, null, 2),
   );
 }
 
@@ -1760,6 +1771,15 @@ function cocosEngineVersion(settings) {
     return value;
   }
   return '3.0.0';
+}
+
+function generateProjectId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 // writeRecoveryReport imported from ../../utils/recoveryReport

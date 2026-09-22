@@ -144,7 +144,12 @@ describe('reverseProject3x — end-to-end on a synthetic fixture', () => {
     expect(mainBundle.pathCount).toBe(2);
     expect(mainBundle.recovered).toBeGreaterThanOrEqual(2);
     const project = JSON.parse(fs.readFileSync(path.join(out, 'project.json'), 'utf8'));
-    expect(project.version).toBe('3.8.1');
+    expect(project.engine).toBe('cocos-creator-js');
+    expect(project.packages).toBe('packages');
+    const packageJson = JSON.parse(fs.readFileSync(path.join(out, 'package.json'), 'utf8'));
+    expect(packageJson.version).toBe('3.8.1');
+    expect(packageJson.creator.version).toBe('3.8.1');
+    expect(packageJson.uuid).toMatch(/^[0-9a-f-]{36}$/i);
 
     // True 3.x (settings.json) scenes emit .scene + matching meta.
     expect(fs.existsSync(path.join(out, 'assets', 'main', 'scenes', 'Main.scene'))).toBe(true);
