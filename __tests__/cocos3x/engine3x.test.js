@@ -9,6 +9,8 @@ const {
   shortMetaId,
   extractRfUuid,
   splitSystemRegisterSource,
+  extractWeChatDefineModules,
+  wechatDefineOutRel,
   sanitizeScriptFileName,
   isEngineVendorScript,
   scriptOutRel,
@@ -39,6 +41,7 @@ describe('reverseProject3x — end-to-end on a synthetic fixture', () => {
     writeFile(
       path.join(src, 'src', 'settings.json'),
       JSON.stringify({
+        CocosEngine: '3.8.1',
         launch: { launchScene: 'u-scene' },
         assets: { importBase: 'import', nativeBase: 'native' },
       })
@@ -140,6 +143,8 @@ describe('reverseProject3x — end-to-end on a synthetic fixture', () => {
     expect(mainBundle.name).toBe('main');
     expect(mainBundle.pathCount).toBe(2);
     expect(mainBundle.recovered).toBeGreaterThanOrEqual(2);
+    const project = JSON.parse(fs.readFileSync(path.join(out, 'project.json'), 'utf8'));
+    expect(project.version).toBe('3.8.1');
 
     // True 3.x (settings.json) scenes emit .scene + matching meta.
     expect(fs.existsSync(path.join(out, 'assets', 'main', 'scenes', 'Main.scene'))).toBe(true);
@@ -711,6 +716,45 @@ describe('isEngineVendorScript / scriptOutRel', () => {
 });
 
 describe('sanitizeScriptFileName / splitSystemRegisterSource', () => {
+  it('extracts root WeChat define factories and preserves their module paths', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-reverse-wechat-'));
+    try {
+      const src = path.join(root, 'wechat-define-build');
+      const sourceGame = [
+        'require("./local-dev.js");',
+        'define("assets/main/Game.js",function(require,module,exports){',
+        '  cc._RF.push(module,"fcmR3XADNLgJ1ByKhqcC5Z","Game");',
+        '  module.exports = require("./Logic");',
+        '  cc._RF.pop();',
+        '});',
+        'define("@babel/runtime/helpers/x.js",function(require,module,exports){module.exports=1;});',
+      ].join('\n');
+      fs.mkdirSync(path.join(src, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(src, 'src', 'settings.json'), '{}');
+      fs.writeFileSync(path.join(src, 'game.js'), sourceGame);
+
+      const parts = extractWeChatDefineModules(sourceGame);
+      expect(parts.map((part) => part.id)).toEqual([
+        'assets/main/Game.js', '@babel/runtime/helpers/x.js',
+      ]);
+      expect(wechatDefineOutRel('assets/main/Game.js')).toBe('wechat/assets/main/Game.js');
+      expect(wechatDefineOutRel('@babel/runtime/helpers/x.js')).toBe(
+        '_vendor/wechat/@babel/runtime/helpers/x.js',
+      );
+
+      const out = path.join(root, 'out-wechat-define');
+      const summary = await reverseProject3x({ sourcePath: src, outputPath: out, scriptsOnly: true });
+      const gameOut = path.join(out, 'assets', 'Scripts', 'wechat', 'assets', 'main', 'Game.js');
+      expect(summary.scripts.total).toBe(2);
+      expect(summary.scripts.game).toBe(1);
+      expect(summary.scripts.vendor).toBe(1);
+      expect(fs.existsSync(gameOut)).toBe(true);
+      expect(fs.readFileSync(gameOut, 'utf8')).toContain('module.exports = require("./Logic")');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('maps chunks:///_virtual ids to sane filenames', () => {
     expect(sanitizeScriptFileName('chunks:///_virtual/Foo.ts')).toBe('Foo.ts');
     expect(sanitizeScriptFileName('chunks:///_virtual/game/Bar.ts')).toBe('game/Bar.ts');

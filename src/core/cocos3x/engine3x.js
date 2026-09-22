@@ -170,7 +170,7 @@ async function reverseProject3x(options) {
       bundles: summary.bundles,
     });
   } else {
-    await writeProjectDescriptor(outputPath);
+    await writeProjectDescriptor(outputPath, projectFlavor.settings);
   }
 
   summary.reportPath = await writeRecoveryReport(outputPath, summary, sourcePath);
@@ -1261,6 +1261,33 @@ async function recoverScripts(sourcePath, outputPath, verbose, extras = {}) {
     }
   }
 
+  // 3) WeChat exports sometimes flatten the whole Cocos runtime into the
+  // root game.js via `define("module-id", function (require, module, exports)
+  // { ... })`. This is neither a Creator 3.x SystemJS chunk nor a 2.x
+  // browserify bundle, so the normal bundle demuxers cannot see its modules.
+  // Keep the original module ids below Scripts/wechat/ so relative requires
+  // remain inspectable and no recovered file collides with bundle output.
+  const rootGame = path.join(sourcePath, 'game.js');
+  if (fs.existsSync(rootGame)) {
+    try {
+      const code = await readFile(rootGame, 'utf-8');
+      const extracted = await splitAndEmitWeChatDefines(code, scriptsOut, verbose);
+      total += extracted.total;
+      game += extracted.game;
+      vendor += extracted.vendor;
+      if (verbose || extracted.total > 0) {
+        logger.info(
+          `Demux root game.js: ${extracted.total} WeChat define modules `
+          + `(game=${extracted.game}, vendor=${extracted.vendor})`,
+        );
+      }
+    } catch (err) {
+      const msg = `demux root game.js: ${err.message}`;
+      warnings.push(msg);
+      logger.debug(msg);
+    }
+  }
+
   // Preserve top-level bootstrap scripts under _boot/.
   const bootFiles = [
     'main.js', 'game.js', 'game.json', 'ccRequire.js',
@@ -1334,6 +1361,133 @@ function countSystemRegisters(code) {
   if (!code) return 0;
   const matches = code.match(/System\s*\.\s*register\s*\(/g);
   return matches ? matches.length : 0;
+}
+
+/**
+ * Extract CommonJS factories from a WeChat single-file wrapper.
+ *
+ * The wrapper used by some Cocos Creator exports is intentionally simple:
+ * `define("assets/main/index.js", function(require, module, exports) { ... })`.
+ * It can be heavily minified/obfuscated, therefore this scanner only relies on
+ * the stable wrapper syntax and balances the factory body instead of assuming
+ * newlines, indentation, or a browserify module table.
+ *
+ * @returns {{id: string, source: string, uuid: string|null}[]}
+ */
+function extractWeChatDefineModules(code) {
+  if (!code || typeof code !== 'string') return [];
+
+  const records = [];
+  const seen = new Set();
+  const marker = /\bdefine\s*\(\s*(["'])((?:\\.|(?!\1)[\s\S])*)\1\s*,\s*function\b/g;
+  let match;
+  while ((match = marker.exec(code)) !== null) {
+    let id;
+    try {
+      // Module ids are string literals. JSON parsing is safe for double quotes;
+      // for single quotes retain the literal content (real Cocos ids are ASCII).
+      id = match[1] === '"' ? JSON.parse(`"${match[2]}"`) : match[2].replace(/\\'/g, "'");
+    } catch {
+      continue;
+    }
+    if (!id || seen.has(id)) continue;
+
+    const bodyOpen = code.indexOf('{', marker.lastIndex);
+    if (bodyOpen < 0) continue;
+    const bodyEnd = findBalancedBraceEnd(code, bodyOpen);
+    if (bodyEnd < 0) continue;
+
+    const source = code.slice(bodyOpen + 1, bodyEnd).trim();
+    if (!source) continue;
+    seen.add(id);
+    records.push({ id, source: `${source}\n`, uuid: extractRfUuid(source) });
+    // Continue after this factory. It also avoids matching a literal `define(`
+    // nested inside its body as a second top-level module.
+    marker.lastIndex = bodyEnd + 1;
+  }
+  return records;
+}
+
+/** Balance a JavaScript function body while ignoring strings and comments. */
+function findBalancedBraceEnd(code, start) {
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let i = start; i < code.length; i += 1) {
+    const ch = code[i];
+    const next = code[i + 1];
+    if (lineComment) {
+      if (ch === '\n' || ch === '\r') lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (ch === '*' && next === '/') {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+async function splitAndEmitWeChatDefines(code, scriptsOut, verbose) {
+  const parts = extractWeChatDefineModules(code);
+  let total = 0;
+  let game = 0;
+  let vendor = 0;
+  for (const part of parts) {
+    const rel = wechatDefineOutRel(part.id);
+    const dest = path.join(scriptsOut, rel);
+    await mkdir(path.dirname(dest), { recursive: true });
+    const header = `// Recovered from WeChat define(${JSON.stringify(part.id)})\n`;
+    await writeFile(dest, `${header}${part.source}`);
+    await writeScriptMeta(dest, part.uuid);
+    total += 1;
+    if (isUnderVendor(rel)) vendor += 1;
+    else game += 1;
+    if (verbose) logger.debug(`WeChat define split: ${rel}`);
+  }
+  return { total, game, vendor };
+}
+
+function wechatDefineOutRel(id) {
+  let safe = String(id || 'module.js')
+    .replace(/^[/\\]+/, '')
+    .replace(/\0/g, '')
+    .replace(/\.\./g, '_')
+    .replace(/[?%*:|"<>]/g, '_');
+  if (!/\.(?:[cm]?js|tsx?)$/i.test(safe)) safe += '.js';
+  const rel = `wechat/${safe.split(/[/\\]+/).filter(Boolean).join('/')}`;
+  const vendor = /^@babel\//i.test(safe) || /^cocos-js\//i.test(safe);
+  return scriptOutRel(rel, { forceVendor: vendor });
 }
 
 /**
@@ -1580,10 +1734,16 @@ async function writeScriptMeta(scriptPath, uuidHint) {
   await writeFile(scriptPath + '.meta', JSON.stringify(meta, null, 2));
 }
 
-async function writeProjectDescriptor(outputPath) {
+/**
+ * Write a minimal Creator project descriptor.  Recovered 3.x builds retain
+ * their source engine version in src/settings.json as CocosEngine, and Creator
+ * Dashboard uses project.json.version to choose the editor.  Preserve that
+ * version so a 3.8.x build is not incorrectly presented as a 3.0.0 project.
+ */
+async function writeProjectDescriptor(outputPath, settings = {}) {
   const descriptor = {
     name: 'recovered-cocos3-project',
-    version: '3.0.0',
+    version: cocosEngineVersion(settings),
     engine: 'cocos-creator-3',
     packages: ['assets'],
     recoveredBy: 'cc-reverse',
@@ -1592,6 +1752,14 @@ async function writeProjectDescriptor(outputPath) {
     path.join(outputPath, 'project.json'),
     JSON.stringify(descriptor, null, 2),
   );
+}
+
+function cocosEngineVersion(settings) {
+  const value = settings && settings.CocosEngine;
+  if (typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value)) {
+    return value;
+  }
+  return '3.0.0';
 }
 
 // writeRecoveryReport imported from ../../utils/recoveryReport
@@ -1604,6 +1772,9 @@ module.exports = {
   writeMeta,
   splitSystemRegisterSource,
   splitAndEmitSystemRegisters,
+  extractWeChatDefineModules,
+  splitAndEmitWeChatDefines,
+  wechatDefineOutRel,
   countSystemRegisters,
   sanitizeScriptFileName,
   isEngineVendorScript,
@@ -1614,5 +1785,6 @@ module.exports = {
   buildImageSubMetas,
   shortMetaId,
   extractRfUuid,
+  cocosEngineVersion,
 };
 

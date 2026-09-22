@@ -29,6 +29,7 @@ Cocos Creator 逆向工程工具，用于从编译后的 Cocos Creator 游戏中
 - **3.x bundle 感知**：自动发现 `assets/main`、`assets/internal`、`assets/resources` 及自定义 bundle；按 `config.json` 还原每个资源的原始项目路径
 - **CCON 二进制解码**（`.cconb` / `.ccon` v1 与 v2）：解析 magic、版本头与对齐 chunk；v2 的 notepack(MessagePack) body 也能解码还原
 - **脚本恢复**：2.x 把打包后的 `project.js` 拆分为每文件 `.ts`（browserify 切片 + AST 兜底，保留 `cc._RF` UUID 挂载）；3.x 复制 `src/chunks/*.js`（SystemJS 模块）
+- **微信单文件封装适配**：识别根目录 `game.js` 中的 `define("模块名", factory)` 包装，按原始模块 ID 拆出 CommonJS 工厂；适用于经过微信导出合并、压缩或混淆后不再保留 `src/chunks/` 的 Cocos 3.x 包。
 - **2.x packed 资源还原**：按 `settings.packedAssets` 拆分场景 / 预制体 / SpriteFrame / 音频，并拷贝 `raw-assets`
 - **恢复报告**：输出目录生成 `RECOVERY_REPORT.md`（脚本格式、资源统计、3.x bundle 表）
 
@@ -51,6 +52,7 @@ Cocos Creator 逆向工程工具，用于从编译后的 Cocos Creator 游戏中
 - 支持 **CCON v1**（JSON 内嵌 + 8 字节对齐 chunks）与 **CCON v2**（notepack/MessagePack body 解码为 JSON 文档；无法解码时回退保留 `.ccon-v2.rawjson`）
 - 加密：仅 bundle 级 `index.jsc`，可通过 `--key` 传入或从 `application.js` / `src/settings.json` 自动抽取
 - 使用 `--version-hint 3.x` 强制指定版本；`--bundle <name>` 只处理指定 bundle（可重复）
+- 微信小游戏若仅保留根 `game.js`，工具会自动额外尝试拆分其中的 `define(...)` 模块，输出到 `assets/Scripts/wechat/`；`@babel` 与 `cocos-js` 运行时模块会放到 `_vendor/`。
 
 ## 安装
 
